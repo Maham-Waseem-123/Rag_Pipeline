@@ -1,0 +1,158 @@
+%%writefile requirements.txt
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-text-splitters
+pypdf
+pymupdf
+sentence-transformers
+faiss-cpu
+chromadb
+langchain-groq
+python-dotenv
+typesense
+langchain-openai
+langgraph
+PyPDF2
+rank_bm25
+
+
+#Writing requirements.txt
+
+
+!pip install --upgrade pip
+!pip install -r requirements.txt
+
+Necessary Imports
+
+import os
+from langchain_community.document_loaders import PyPDFLoader, PyMuPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings
+import uuid
+from typing import List, Dict, Any, Tuple
+from sklearn.metrics.pairwise import cosine_similarity
+from pathlib import Path
+from PyPDF2 import PdfReader
+from langchain.schema import Document
+from sklearn.feature_extraction.text import TfidfVectorizer
+from rank_bm25 import BM25Okapi
+import nltk
+from nltk.tokenize import word_tokenize
+from transformers import pipeline
+import re
+
+
+import nltk
+
+# Download the required tokenizer explicitly
+# Ensure required NLTK resources are downloaded
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)  # Fix for LookupError
+
+
+#Data Ingestion:
+
+# ------------------------
+# Load all PDFs from a directory
+# ------------------------
+def process_all_pdfs(pdf_directory):
+    """Process all PDF files in a directory and return LangChain Document objects"""
+    all_documents = []
+    pdf_dir = Path(pdf_directory)
+    pdf_files = list(pdf_dir.glob("**/*.pdf"))
+
+    print(f"Found {len(pdf_files)} PDF files to process.")
+
+    for pdf_file in pdf_files:
+        print(f"\nProcessing: {pdf_file.name}")
+        try:
+            loader = PyPDFLoader(str(pdf_file))
+            documents = loader.load()
+
+            # Add source info to metadata
+            for doc in documents:
+                doc.metadata['source_file'] = pdf_file.name
+                doc.metadata['file_type'] = 'pdf'
+
+            all_documents.extend(documents)
+            print(f"  ✓ Loaded {len(documents)} pages")
+
+        except Exception as e:
+            print(f"  ✗ Error loading {pdf_file.name}: {e}")
+
+    print(f"\nTotal documents loaded: {len(all_documents)}")
+    return all_documents
+
+# ------------------------
+# Different chunking strategies
+# ------------------------
+def chunk_documents(documents, strategy="pagewise"):
+    all_chunks = []
+
+    for doc in documents:
+        text = doc.page_content
+        metadata = doc.metadata.copy()
+
+        if strategy == "pagewise":
+            # Already loaded pagewise via PyPDFLoader, keep as is
+            all_chunks.append(Document(page_content=text, metadata=metadata))
+
+        elif strategy == "paragraph":
+            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+            for p in paragraphs:
+                all_chunks.append(Document(page_content=p, metadata=metadata))
+
+        elif strategy == "sentence":
+            sentence_endings = re.compile(r'(?<=[.!?])\s+')
+            sentences = [s.strip() for s in sentence_endings.split(text) if s.strip()]
+
+            i = 0
+            min_sent, max_sent = 3, 8
+            while i < len(sentences):
+                chunk_size = min(max_sent, len(sentences) - i)
+                if chunk_size < min_sent:
+                    chunk_size = len(sentences) - i
+                chunk_text = " ".join(sentences[i:i + chunk_size])
+                all_chunks.append(Document(page_content=chunk_text, metadata=metadata))
+                i += chunk_size
+
+        elif strategy == "title":
+            pattern = r'(?:^|\n)([A-Z][A-Z\s\d]+)\n'
+            splits = [m.start() for m in re.finditer(pattern, text)]
+            splits.append(len(text))
+            for i in range(len(splits)-1):
+                chunk_text = text[splits[i]:splits[i+1]].strip()
+                if chunk_text:
+                    all_chunks.append(Document(page_content=chunk_text, metadata=metadata))
+
+        elif strategy == "character":
+            chunk_size = 500
+            for i in range(0, len(text), chunk_size):
+                all_chunks.append(Document(page_content=text[i:i+chunk_size], metadata=metadata))
+
+        elif strategy == "token":
+            token_size = 100
+            tokens = text.split()
+            for i in range(0, len(tokens), token_size):
+                chunk_text = " ".join(tokens[i:i+token_size])
+                all_chunks.append(Document(page_content=chunk_text, metadata=metadata))
+
+        elif strategy == "overlapping":
+            chunk_size = 500
+            overlap = 100
+            start = 0
+            while start < len(text):
+                end = start + chunk_size
+                all_chunks.append(Document(page_content=text[start:end], metadata=metadata))
+                start += chunk_size - overlap
+
+        else:
+            raise ValueError(f"Unknown chunking strategy: {strategy}")
+
+    print(f"📄 Total chunks created with '{strategy}' strategy: {len(all_chunks)}")
+    return all_chunks
