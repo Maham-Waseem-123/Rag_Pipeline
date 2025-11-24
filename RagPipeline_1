@@ -156,3 +156,758 @@ def chunk_documents(documents, strategy="pagewise"):
 
     print(f"📄 Total chunks created with '{strategy}' strategy: {len(all_chunks)}")
     return all_chunks
+
+
+Creating Embedding Manager
+We created the EmbeddingManager class to simplify the process of turning text into numerical representations called embeddings using the SentenceTransformer model. When we create an instance of this class, it automatically loads the chosen model, which by default is "all-MiniLM-L6-v2", and prepares it for use. The class has a method to generate embeddings for a list of texts, converting each text into a numerical vector while showing a progress indicator and confirming the size of the generated embeddings. It also includes a method to check the size of each embedding vector so we know the dimensions of the output. Overall, the EmbeddingManager provides a simple and organized way to handle embeddings for text data, making it ready for tasks like semantic search, similarity comparisons, or other natural language processing applications.
+class EmbeddingManager:
+    """Handles document embedding generation using SentenceTransformer."""
+
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        """
+        Initialize the embedding manager.
+
+        Args:
+            model_name: HuggingFace model name for sentence embeddings.
+        """
+        self.model_name = model_name
+        self.model = None
+        self._load_model()
+
+    def _load_model(self):
+        """Load the SentenceTransformer model."""
+        try:
+            print(f"Loading embedding model: {self.model_name}")
+            self.model = SentenceTransformer(self.model_name)
+            print(
+                f"Model loaded successfully. "
+                f"Embedding dimension: {self.model.get_sentence_embedding_dimension()}"
+            )
+        except Exception as e:
+            print(f"Error loading model {self.model_name}: {e}")
+            raise
+
+    def generate_embeddings(self, texts: List[str]) -> np.ndarray:
+        """
+        Generate embeddings for a list of texts.
+
+        Args:
+            texts: List of text strings to embed.
+
+        Returns:
+            numpy array of embeddings with shape (len(texts), embedding_dim)
+        """
+        if not self.model:
+            raise ValueError("Model not loaded")
+
+        print(f"Generating embeddings for {len(texts)} texts...")
+        embeddings = self.model.encode(texts, show_progress_bar=True)
+        print(f"Generated embeddings with shape: {embeddings.shape}")
+        return embeddings
+
+    def get_embedding_dimension(self) -> int:
+        """Get the embedding dimension of the model."""
+        if not self.model:
+            raise ValueError("Model not loaded")
+        return self.model.get_sentence_embedding_dimension()
+
+
+# ✅ Initialize the embedding manager
+embedding_manager = EmbeddingManager()
+embedding_manager
+
+
+Creating Vector Store Class
+We created the VectorStore class to manage document embeddings using a ChromaDB vector store. When an instance of this class is created, it automatically initializes the vector store by creating a persistent storage directory and either loading or creating a collection for storing document embeddings. The class provides a method to add documents along with their embeddings to the store. Each document is assigned a unique ID, and relevant metadata such as its index and content length is stored. This ensures that all documents and their embeddings are organized and easily retrievable. Overall, the VectorStore class simplifies the process of storing, managing, and tracking document embeddings, making it ready for tasks like retrieval-augmented generation (RAG) or semantic search.
+
+
+class VectorStore:
+    """Manages document embeddings in a ChromaDB vector store."""
+
+    def __init__(self, collection_name: str = "pdf_documents", persist_directory: str = "../data/vector_store"):
+        self.collection_name = collection_name
+        self.persist_directory = persist_directory
+        self.client = None
+        self.collection = None
+        self._initialize_store()
+
+    def _initialize_store(self):
+        """Initialize ChromaDB client and collection."""
+        try:
+            os.makedirs(self.persist_directory, exist_ok=True)
+            self.client = chromadb.PersistentClient(path=self.persist_directory)
+
+            self.collection = self.client.get_or_create_collection(
+                name=self.collection_name,
+                metadata={"description": "PDF document embeddings for RAG"}
+            )
+
+            print(f"✅ Vector store initialized. Collection: {self.collection_name}")
+            print(f"📄 Existing documents in collection: {self.collection.count()}")
+
+        except Exception as e:
+            print(f"❌ Error initializing vector store: {e}")
+            raise
+
+    def add_documents(self, documents: List[Any], embeddings: np.ndarray):
+        """
+        Add documents and their embeddings to the vector store.
+        """
+        if len(documents) != len(embeddings):
+            raise ValueError("Number of documents must match number of embeddings")
+
+        print(f"🧩 Adding {len(documents)} documents to vector store...")
+
+        ids, metadatas, documents_text, embeddings_list = [], [], [], []
+
+        for i, (doc, embedding) in enumerate(zip(documents, embeddings)):
+            doc_id = f"doc_{uuid.uuid4().hex[:8]}_{i}"
+            ids.append(doc_id)
+            metadata = dict(doc.metadata)
+            metadata["doc_index"] = i
+            metadata["content_length"] = len(doc.page_content)
+            metadatas.append(metadata)
+            documents_text.append(doc.page_content)
+            embeddings_list.append(embedding.tolist())
+
+        try:
+            self.collection.add(
+                ids=ids,
+                embeddings=embeddings_list,
+                metadatas=metadatas,
+                documents=documents_text
+            )
+            print(f"✅ Successfully added {len(documents)} documents to vector store.")
+            print(f"📄 Total documents in collection: {self.collection.count()}")
+
+        except Exception as e:
+            print(f"❌ Error adding documents to vector store: {e}")
+            raise
+Retriever Pipeline From Vector Store
+We created the RAGRetriever class to handle searching and retrieving documents from the vector store based on a user query. When we create an instance of this class, we provide it with a vector store containing the document embeddings and an embedding manager to generate query embeddings.
+
+When a query is submitted, the retriever first converts it into a numerical embedding using the embedding manager. It then searches the vector store for the most similar documents, up to a specified number of top results. The retriever also calculates similarity scores from the distances provided by the vector store and filters out any results below a set threshold. Each retrieved document includes its content, metadata, similarity score, distance, and rank.
+
+Overall, RAGRetriever makes it easy to find relevant documents efficiently, providing structured results ready for tasks like retrieval-augmented generation (RAG) or semantic search.
+class RAGRetriever:
+    """Handles query-based retrieval from the vector store"""
+
+    def __init__(self, vector_store: VectorStore, embedding_manager: EmbeddingManager):
+        """
+        Initialize the retriever
+
+        Args:
+            vector_store: Vector store containing document embeddings
+            embedding_manager: Manager for generating query embeddings
+        """
+        self.vector_store = vector_store
+        self.embedding_manager = embedding_manager
+
+    def retrieve(self, query: str, top_k: int = 5, score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant documents for a query
+
+        Args:
+            query: The search query
+            top_k: Number of top results to return
+            score_threshold: Minimum similarity score threshold
+
+        Returns:
+            List of dictionaries containing retrieved documents and metadata
+        """
+        print(f"Retrieving documents for query: '{query}'")
+        print(f"Top K: {top_k}, Score threshold: {score_threshold}")
+
+        # Generate query embedding
+        query_embedding = self.embedding_manager.generate_embeddings([query])[0]
+
+        # Search in vector store
+        try:
+            results = self.vector_store.collection.query(
+                query_embeddings=[query_embedding.tolist()],
+                n_results=top_k
+            )
+
+            # Process results
+            retrieved_docs = []
+
+            if results['documents'] and results['documents'][0]:
+                documents = results['documents'][0]
+                metadatas = results['metadatas'][0]
+                distances = results['distances'][0]
+                ids = results['ids'][0]
+
+                for i, (doc_id, document, metadata, distance) in enumerate(zip(ids, documents, metadatas, distances)):
+                    # Convert distance to similarity score (ChromaDB uses cosine distance)
+                    similarity_score = 1 - distance
+
+                    if similarity_score >= score_threshold:
+                        retrieved_docs.append({
+                            'id': doc_id,
+                            'content': document,
+                            'metadata': metadata,
+                            'similarity_score': similarity_score,
+                            'distance': distance,
+                            'rank': i + 1
+                        })
+
+                print(f"Retrieved {len(retrieved_docs)} documents (after filtering)")
+            else:
+                print("No documents found")
+
+            return retrieved_docs
+
+        except Exception as e:
+            print(f"Error during retrieval: {e}")
+            return []
+
+Generator Pipeline
+We set up a simple RAG (Retrieval-Augmented Generation) pipeline using the llama-3.1-8b-instant model from Groq. First, we initialize the Groq LLM (ChatGroq) with the API key, model name, and parameters such as temperature and maximum tokens.
+
+Next, we created the rag_simple function to handle the full RAG process. When a user submits a query, the function uses the retriever to fetch the most relevant documents from the vector store. It combines the content of these documents into a single context. If no relevant documents are found, it returns a message indicating that there is no context to answer the question.
+
+The function then constructs a prompt for the LLM, instructing llama-3.1-8b-instant to answer the query concisely using the retrieved context. The model processes this prompt and generates a response, which the function returns as the answer.
+
+In short, this pipeline connects document retrieval with language model generation. The retriever provides the knowledge from your stored documents, and llama-3.1-8b-instant produces accurate and concise answers based on that context, making the system capable of answering questions using the information in your documents.
+### Simple RAG pipeline with Groq LLM
+from langchain_groq import ChatGroq
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+### Initialize the Groq LLM (set your GROQ_API_KEY in environment)
+groq_api_key = "sdsds"
+
+llm = ChatGroq(
+    groq_api_key=groq_api_key,
+    model_name="llama-3.1-8b-instant",
+    temperature=0.1,
+    max_tokens=1024
+)
+
+
+def faithfulness_score(context: str, answer: str, embedding_manager) -> float:
+    """
+    Compute a faithfulness score (0 to 1) for an answer with respect to the context.
+    Higher score means more faithful.
+    """
+    if not context or not answer:
+        return 0.0
+
+    # Compute embeddings using the embedding_manager
+    context_emb = embedding_manager.generate_embeddings([context])
+    answer_emb = embedding_manager.generate_embeddings([answer])
+
+    # Compute cosine similarity
+    score = cosine_similarity(answer_emb, context_emb)[0][0]
+
+    # Ensure the score is between 0 and 1
+    score = max(0.0, min(1.0, score))
+    return score
+
+
+def rag_simple_with_faithfulness(query: str, retriever, llm, embedding_manager, top_k=3):
+    # Retrieve relevant context
+    results = retriever.retrieve(query, top_k=top_k)
+    context = "\n\n".join([doc['content'] for doc in results]) if results else ""
+
+    if not context:
+        return "No relevant context found to answer the question.", 0.0
+
+    prompt = f"""Use the following context to answer the question concisely.
+
+Context:
+{context}
+
+Question: {query}
+
+Answer:"""
+
+    # Generate the answer
+    response = llm.invoke([prompt])
+    answer = response.content
+
+    # Compute faithfulness
+    score = faithfulness_score(context, answer, embedding_manager)
+
+    return answer, score
+
+
+# Simple tokenizer (no NLTK required)
+def simple_tokenize(text: str) -> List[str]:
+    """Lowercase and split text into words, removing punctuation."""
+    text = text.lower()
+    tokens = re.findall(r'\b\w+\b', text)
+    return tokens
+
+
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from typing import List, Dict, Any
+
+# ------------------------
+# BM25 Retriever
+# ------------------------
+class BM25Retriever:
+    """Term-based retrieval using BM25 (no NLTK dependency)."""
+
+    def __init__(self, documents: List[Any]):
+        """
+        Args:
+            documents: List of Document objects with .page_content and .metadata
+        """
+        self.documents = documents
+        self.texts = [doc.page_content for doc in documents]
+        self.tokenized_texts = [simple_tokenize(t) for t in self.texts]
+        self.bm25 = BM25Okapi(self.tokenized_texts)
+
+    def retrieve(self, query: str, top_k: int = 5, score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+        print(f"Retrieving documents for query: '{query}' using BM25")
+        print(f"Top K: {top_k}, Score threshold: {score_threshold}")
+
+        query_tokens = simple_tokenize(query)
+        scores = self.bm25.get_scores(query_tokens)
+        ranked_idx = np.argsort(scores)[::-1]
+
+        retrieved_docs = []
+        for i in ranked_idx:
+            if scores[i] < score_threshold:
+                continue
+            retrieved_docs.append({
+                'id': f"doc_{i}",
+                'content': self.texts[i],
+                'metadata': self.documents[i].metadata,
+                'similarity_score': float(scores[i]),
+                'rank': len(retrieved_docs) + 1
+            })
+            if len(retrieved_docs) >= top_k:
+                break
+
+        print(f"Retrieved {len(retrieved_docs)} documents (after filtering)")
+        return retrieved_docs
+
+
+# ------------------------
+# MMR Retriever
+# ------------------------
+class MMRRetriever:
+    """Dense retrieval with Maximal Marginal Relevance (MMR)."""
+
+    def __init__(self, documents: List[Any], embedding_manager: Any):
+        self.documents = documents
+        self.embedding_manager = embedding_manager
+        self.texts = [doc.page_content for doc in documents]
+        self.embeddings = embedding_manager.generate_embeddings(self.texts)
+
+    def retrieve(self, query: str, top_k: int = 5, lambda_param: float = 0.5, score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+        print(f"Retrieving documents for query: '{query}' using MMR")
+        print(f"Top K: {top_k}, Score threshold: {score_threshold}")
+
+        query_emb = self.embedding_manager.generate_embeddings([query])[0]
+        doc_similarities = cosine_similarity([query_emb], self.embeddings)[0]
+
+        selected = []
+        candidate_indices = list(range(len(self.documents)))
+
+        while len(selected) < top_k and candidate_indices:
+            mmr_scores = []
+            for idx in candidate_indices:
+                sim_to_query = doc_similarities[idx]
+                sim_to_selected = max([cosine_similarity([self.embeddings[idx]], [self.embeddings[s]])[0][0] for s in selected], default=0)
+                score = lambda_param * sim_to_query - (1 - lambda_param) * sim_to_selected
+                mmr_scores.append(score)
+            best_idx = candidate_indices[np.argmax(mmr_scores)]
+            if doc_similarities[best_idx] < score_threshold:
+                break
+            selected.append(best_idx)
+            candidate_indices.remove(best_idx)
+
+        retrieved_docs = []
+        for rank, idx in enumerate(selected):
+            retrieved_docs.append({
+                'id': f"mmr_{idx}",
+                'content': self.texts[idx],
+                'metadata': self.documents[idx].metadata,
+                'similarity_score': float(doc_similarities[idx]),
+                'rank': rank + 1
+            })
+
+        print(f"Retrieved {len(retrieved_docs)} documents (after filtering)")
+        return retrieved_docs
+
+
+# ------------------------
+# Hybrid Retriever
+# ------------------------
+class HybridRetriever:
+    """Hybrid retrieval combining BM25 + dense embeddings."""
+
+    def __init__(self, documents: List[Any], embedding_manager: Any, alpha: float = 0.5):
+        self.documents = documents
+        self.texts = [doc.page_content for doc in documents]
+        self.embedding_manager = embedding_manager
+        self.alpha = alpha
+
+        # BM25 setup
+        self.tokenized_texts = [simple_tokenize(t) for t in self.texts]
+        self.bm25 = BM25Okapi(self.tokenized_texts)
+
+        # Dense embeddings
+        self.embeddings = self.embedding_manager.generate_embeddings(self.texts)
+
+    def retrieve(self, query: str, top_k: int = 5, score_threshold: float = 0.0) -> List[Dict[str, Any]]:
+        print(f"Retrieving documents for query: '{query}' using Hybrid Retriever")
+        print(f"Top K: {top_k}, Score threshold: {score_threshold}")
+
+        query_tokens = simple_tokenize(query)
+        bm25_scores = self.bm25.get_scores(query_tokens)
+        query_embedding = self.embedding_manager.generate_embeddings([query])[0]
+        dense_scores = cosine_similarity([query_embedding], self.embeddings)[0]
+
+        final_scores = self.alpha * bm25_scores + (1 - self.alpha) * dense_scores
+        ranked_idx = np.argsort(final_scores)[::-1]
+
+        retrieved_docs = []
+        for i in ranked_idx:
+            if final_scores[i] < score_threshold:
+                continue
+            retrieved_docs.append({
+                'id': f"doc_{i}",
+                'content': self.texts[i],
+                'metadata': self.documents[i].metadata,
+                'bm25_score': float(bm25_scores[i]),
+                'dense_score': float(dense_scores[i]),
+                'final_score': float(final_scores[i]),
+                'rank': len(retrieved_docs) + 1
+            })
+            if len(retrieved_docs) >= top_k:
+                break
+
+        print(f"Retrieved {len(retrieved_docs)} documents (after filtering)")
+        return retrieved_docs
+
+# Initialize summarizer (can be done once)
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
+def summarize_passages(retrieved_docs: list, max_length=150, min_length=50) -> list:
+    """
+    Summarize long passages to extract salient points.
+
+    Args:
+        retrieved_docs: List of dictionaries containing 'content' and metadata
+        max_length: Max tokens for summary
+        min_length: Min tokens for summary
+
+    Returns:
+        List of updated retrieved_docs with 'summary' field
+    """
+    for doc in retrieved_docs:
+        text = doc['content']
+        if len(text.split()) > 100:  # Only summarize if text is lengthy
+            summary = summarizer(text, max_length=max_length, min_length=min_length, do_sample=False)
+            doc['summary'] = summary[0]['summary_text']
+        else:
+            doc['summary'] = text
+    return retrieved_docs
+
+def filter_relevant_context(retrieved_docs: list, keywords: list) -> list:
+    """
+    Keep only documents that contain at least one keyword.
+
+    Args:
+        retrieved_docs: List of dictionaries with 'content'
+        keywords: List of keywords related to the query
+
+    Returns:
+        Filtered list of documents
+    """
+    filtered_docs = []
+    for doc in retrieved_docs:
+        content_lower = doc['content'].lower()
+        if any(kw.lower() in content_lower for kw in keywords):
+            filtered_docs.append(doc)
+    return filtered_docs
+from collections import defaultdict
+import numpy as np
+
+def generate_queries(original_query: str) -> list:
+    """
+    Generate multiple rephrased queries.
+    """
+    # Placeholder: ideally use LLM or paraphraser
+    return [
+        original_query,
+        f"What are the working hours for {original_query}?",
+        f"When is the operation schedule for {original_query}?"
+    ]
+
+def reciprocal_rank_fusion(list_of_results: list, k=60) -> list:
+    """
+    Combine multiple ranked results using Reciprocal Rank Fusion.
+
+    Args:
+        list_of_results: List of lists of retrieved docs for each query
+        k: Constant for RRF (default 60)
+
+    Returns:
+        Fused and reranked list of documents
+    """
+    score_dict = defaultdict(float)
+
+    for results in list_of_results:
+        for rank, doc in enumerate(results):
+            doc_id = doc['id']
+            score_dict[doc_id] += 1 / (k + rank + 1)
+
+    # Merge docs by id
+    merged_docs = {doc['id']: doc for results in list_of_results for doc in results}
+
+    # Sort by RRF score
+    fused_docs = sorted(merged_docs.values(), key=lambda d: score_dict[d['id']], reverse=True)
+
+    return fused_docs
+# ------------------------
+# Process all PDFs in the data directory
+# ------------------------
+all_pdf_documents = process_all_pdfs("/content/drive/MyDrive/Rag_data_pdf/pdf")
+
+# ------------------------
+# Generate embeddings for the documents
+# ------------------------
+texts = [doc.page_content for doc in all_pdf_documents]
+embeddings = embedding_manager.generate_embeddings(texts)
+
+# ------------------------
+# Initialize vector store and add documents
+# ------------------------
+vectorstore = VectorStore()
+vectorstore.add_documents(all_pdf_documents, embeddings)
+
+# ------------------------
+# Initialize RAG retriever
+# ------------------------
+rag_retriever = RAGRetriever(vectorstore, embedding_manager)
+
+# ------------------------
+# Define your query
+# ------------------------
+query = "What are the Regular Hours of Operation?"
+
+# ------------------------
+# Call RAG pipeline with faithfulness scoring
+# ------------------------
+answer, score = rag_simple_with_faithfulness(
+    query=query,
+    retriever=rag_retriever,
+    llm=llm,
+    embedding_manager=embedding_manager,  # Important
+    top_k=3
+)
+
+# ------------------------
+# Print results
+# ------------------------
+print("Answer:", answer)
+print(f"Faithfulness score: {score:.2f}")
+
+import pandas as pd
+from pathlib import Path
+
+# ------------------------
+# Define your combinations
+# ------------------------
+chunking_methods = ["pagewise", "paragraph", "sentence", "title", "character", "token", "overlapping"]
+retrieval_methods = ["Dense", "BM25", "MMR", "Hybrid"]
+post_processing_methods = ["None", "Summarization", "Keyword Filtering", "RRF"]
+
+query = "What are the Regular Hours of Operation?"
+keywords = ["hours", "operation", "schedule"]  # for keyword filtering
+
+results = []
+exp_id = 1
+
+# ------------------------
+# Loop through all combinations
+# ------------------------
+for chunk_type in chunking_methods:
+    print(f"\n--- Processing Chunking Strategy: {chunk_type} ---")
+
+    # 1️⃣ Load PDFs
+    all_pdf_documents = process_all_pdfs(pdf_directory)
+
+    # 2️⃣ Chunk PDFs using the chosen strategy
+    all_chunks = chunk_documents(all_pdf_documents, strategy=chunk_type)
+
+    # 3️⃣ Generate embeddings (for vector store)
+    texts = [doc.page_content for doc in all_chunks]
+    embeddings = embedding_manager.generate_embeddings(texts)
+
+    for retr_method in retrieval_methods:
+        for post_proc in post_processing_methods:
+
+            # 4️⃣ Initialize vector store per combination
+            vectorstore = VectorStore()
+            vectorstore.add_documents(all_chunks, embeddings)
+
+            # 5️⃣ Initialize retriever
+            if retr_method == "Dense":
+                retriever = RAGRetriever(vectorstore, embedding_manager)
+            elif retr_method == "BM25":
+                retriever = BM25Retriever(all_chunks)
+            elif retr_method == "MMR":
+                retriever = MMRRetriever(all_chunks, embedding_manager)
+            elif retr_method == "Hybrid":
+                retriever = HybridRetriever(all_chunks, embedding_manager)
+            else:
+                raise ValueError(f"Unknown retrieval method: {retr_method}")
+
+            # 6️⃣ Retrieve documents + post-processing
+            try:
+                retrieved_docs = retriever.retrieve(query, top_k=3)
+
+                if post_proc == "Summarization":
+                    retrieved_docs = summarize_passages(retrieved_docs)
+                elif post_proc == "Keyword Filtering":
+                    retrieved_docs = filter_relevant_context(retrieved_docs, keywords)
+                elif post_proc == "RRF":
+                    queries = generate_queries(query)
+                    list_of_results = [retriever.retrieve(q) for q in queries]
+                    retrieved_docs = reciprocal_rank_fusion(list_of_results)
+
+                # Combine context for RAG answer
+                context = "\n\n".join([doc.get('summary', doc['content']) for doc in retrieved_docs]) if retrieved_docs else ""
+                if context:
+                    prompt = f"Use the following context to answer the question concisely.\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+                    response = llm.invoke([prompt])
+                    answer = response.content
+                    score = faithfulness_score(context, answer, embedding_manager)
+                else:
+                    answer = "No relevant context found"
+                    score = 0.0
+
+            except Exception as e:
+                answer = f"Error: {str(e)}"
+                score = None
+
+            # 7️⃣ Save results
+            results.append({
+                "Exp_id": exp_id,
+                "Chunking Technique": chunk_type,
+                "Retrieval Technique": retr_method,
+                "Post-processing": post_proc,
+                "Faithfulness Score": score,
+                "Query": query,
+                "Answer": answer
+            })
+
+            print(f"[{exp_id}] {chunk_type} | {retr_method} | {post_proc} -> {score}")
+            exp_id += 1
+
+# ------------------------
+# Save all results to Excel
+# ------------------------
+df = pd.DataFrame(results)
+df.to_excel("RAG_pipeline_results_with_postprocessing.xlsx", index=False)
+print("✅ Results saved to RAG_pipeline_results_with_postprocessing.xlsx")
+import pandas as pd
+from pathlib import Path
+
+# ------------------------
+# Define your combinations
+# ------------------------
+chunking_methods = ["pagewise", "paragraph", "sentence", "title", "character", "token", "overlapping"]
+retrieval_methods = ["Dense", "BM25", "MMR", "Hybrid"]
+post_processing_methods = ["None", "Summarization", "Keyword Filtering", "RRF"]
+
+query = "What are the Regular Hours of Operation?"
+keywords = ["hours", "operation", "schedule"]  # for keyword filtering
+
+results = []
+exp_id = 1
+
+# ------------------------
+# Loop through all combinations
+# ------------------------
+for chunk_type in chunking_methods:
+    print(f"\n--- Processing Chunking Strategy: {chunk_type} ---")
+
+    # 1️⃣ Load PDFs
+    all_pdf_documents = process_all_pdfs(pdf_directory)
+
+    # 2️⃣ Chunk PDFs using the chosen strategy
+    all_chunks = chunk_documents(all_pdf_documents, strategy=chunk_type)
+
+    # 3️⃣ Generate embeddings (for vector store)
+    texts = [doc.page_content for doc in all_chunks]
+    embeddings = embedding_manager.generate_embeddings(texts)
+
+    for retr_method in retrieval_methods:
+        for post_proc in post_processing_methods:
+
+            # 4️⃣ Initialize vector store per combination
+            vectorstore = VectorStore()
+            vectorstore.add_documents(all_chunks, embeddings)
+
+            # 5️⃣ Initialize retriever
+            if retr_method == "Dense":
+                retriever = RAGRetriever(vectorstore, embedding_manager)
+            elif retr_method == "BM25":
+                retriever = BM25Retriever(all_chunks)
+            elif retr_method == "MMR":
+                retriever = MMRRetriever(all_chunks, embedding_manager)
+            elif retr_method == "Hybrid":
+                retriever = HybridRetriever(all_chunks, embedding_manager)
+            else:
+                raise ValueError(f"Unknown retrieval method: {retr_method}")
+
+            # 6️⃣ Retrieve documents + post-processing
+            try:
+                retrieved_docs = retriever.retrieve(query, top_k=3)
+
+                if post_proc == "Summarization":
+                    retrieved_docs = summarize_passages(retrieved_docs)
+                elif post_proc == "Keyword Filtering":
+                    retrieved_docs = filter_relevant_context(retrieved_docs, keywords)
+                elif post_proc == "RRF":
+                    queries = generate_queries(query)
+                    list_of_results = [retriever.retrieve(q) for q in queries]
+                    retrieved_docs = reciprocal_rank_fusion(list_of_results)
+
+                # Combine context for RAG answer
+                context = "\n\n".join([doc.get('summary', doc['content']) for doc in retrieved_docs]) if retrieved_docs else ""
+                if context:
+                    prompt = f"Use the following context to answer the question concisely.\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+                    response = llm.invoke([prompt])
+                    answer = response.content
+                    score = faithfulness_score(context, answer, embedding_manager)
+                else:
+                    answer = "No relevant context found"
+                    score = 0.0
+
+            except Exception as e:
+                answer = f"Error: {str(e)}"
+                score = None
+
+            # 7️⃣ Save results
+            results.append({
+                "Exp_id": exp_id,
+                "Chunking Technique": chunk_type,
+                "Retrieval Technique": retr_method,
+                "Post-processing": post_proc,
+                "Faithfulness Score": score,
+                "Query": query,
+                "Answer": answer
+            })
+
+            print(f"[{exp_id}] {chunk_type} | {retr_method} | {post_proc} -> {score}")
+            exp_id += 1
+
+# ------------------------
+# Save all results to Excel
+# ------------------------
+df = pd.DataFrame(results)
+df.to_excel("RAG_pipeline_results_with_postprocessing.xlsx", index=False)
+print("✅ Results saved to RAG_pipeline_results_with_postprocessing.xlsx")
+
+
