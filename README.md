@@ -70,23 +70,6 @@ rank_bm25
 pip install --upgrade pip
 pip install -r requirements.txt
 
-📁 3. Project Structure
-/your-project
-│
-├── requirements.txt
-├── data/
-│   ├── pdfs/               # input PDFs
-│   └── vector_store/       # persistent ChromaDB storage
-│
-├── src/
-│   ├── ingestion.py        # PDF ingestion + chunking
-│   ├── embeddings.py       # embedding manager
-│   ├── vectorstore.py      # Chroma vector store wrapper
-│   ├── retrievers.py       # vector, BM25, MMR, hybrid retrieval methods
-│   ├── rag_pipeline.py     # RAG + Groq model + faithfulness
-│   └── postprocessing.py   # summarization, filtering, query expansion
-│
-└── README.md
 
 📥 4. Data Ingestion
 Load all PDFs from a directory
